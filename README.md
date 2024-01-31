@@ -1,2 +1,2 @@
-# GaussianNormSample
-GaussianNormSample
+# NormLightGaussian
+NormLightGaussian
