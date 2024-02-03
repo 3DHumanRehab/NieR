@@ -1,48 +1,80 @@
 # NormLightGaussian: 3D Gaussian Splatting for Real lighting scene and Specular Object Reflection
-author<br>
-| [Webpage](https://) | [Full Paper](https://) | [Video](https://) |[Evaluation Images](https://) |<br>
-![Teaser image](assets/concatenate.jpg)
-
-This repository contains the official authors implementation associated with the paper "3D Gaussian Splatting for Real-Time Radiance Field Rendering", which can be found [here](https://repo-sam.inria.fr/fungraph/3d-gaussian-splatting/). We further provide the reference images used to create the error metrics reported in the paper, as well as recently created, pre-trained models. 
 
 
+## conda env
+```
+source activate
+conda deactivate
+conda activate gaussian_splatting
+cd /root/NormLightGaussian
 
-Abstract: **
+work_dir=/root
+data_dir=$work_dir/NormLightGaussian/truck
+model_dir=$work_dir/NormLightGaussian/model_out
 
-
-## Cloning the Repository
-```shell
-# SSH
-git clone https://github.com/3DHumanRehab/NormLightGaussian.git
 ```
 
-The repository contains submodules are the same as 3D Gaussian Splatting.
-```shell
-# SSH
-git clone git@github.com:graphdeco-inria/gaussian-splatting.git --recursive
+## baseline model:
+
+### only train (save model)
+```
+    python train.py -s $data_dir -m $model_dir --is_debug 1
 ```
 
-## Overview
-
-
-
-## Optimizer
-
-The optimizer uses PyTorch and CUDA extensions in a Python environment to produce trained models. 
-
-### Environment Requirements
-we use the same environment as 3D Gaussian Splatting.
-
-### Train
-
-```shell
-python train.py -s <path to COLMAP or NeRF Synthetic dataset> -- model norm_mlp_opacity # Train
+### train with eval (don't save model)
 ```
-you can specify model:original, norm_light, norm_mlp, norm_mlp_opacity
-### Render and Eval
-
-```shell
-python train.py -s <path to COLMAP or NeRF Synthetic dataset> -- model norm_mlp_opacity --eval # Train with train/test split
-python render.py -m <path to trained model> # Generate renderings
-python metrics.py -m <path to trained model> # Compute error metrics on renderings
+    python train.py -s $data_dir -m $model_dir --eval --is_debug 1
 ```
+
+### render and metric
+```
+python render.py -s $data_dir -m $model_dir
+python metrics.py -m $model_dir
+```
+
+
+## model only with normal mlp:
+```
+    python train.py -s $data_dir -m $model_dir  \
+        --use_norm_mlp 1 --is_debug 1
+    python train.py -s $data_dir -m $model_dir --eval \
+        --use_norm_mlp 1 --is_debug 1
+    python render.py -s $data_dir -m $model_dir --use_norm_mlp 1
+    python metrics.py -m $model_dir
+
+```
+
+## model only with densification:
+```
+    python train.py -s $data_dir -m $model_dir \
+        --use_hierarchical 1 --densification_iter 15000 --densify_grad_scaling 0.25 0.5 1 2 4 \
+        --use_hierarchical_split 1 --densify_split_N 2  --is_debug 1
+    
+    python render.py -s $data_dir -m $model_dir
+```
+
+## model with norm mlp and densification by norm grad:
+```
+    python train.py -s $data_dir -m $model_dir \
+        --use_hierarchical 1 --densification_iter 15000 --densify_grad_scaling 0.25 0.5 1 2 4 \
+        --use_hierarchical_split 1 --densify_split_N 2  \
+        --use_norm_grads 1 --norm_grads_weight 0.1 --is_debug 1
+
+    python render.py -s $data_dir -m $model_dir --use_norm_mlp 1
+```
+
+
+
+## evaluate pipeline :
+
+```
+    python evaluate_pipeline.py -s $data_dir -m $model_dir --eval \
+        --eval_norm_mlp 1 \
+        --eval_densification 1\
+        --eval_norm_grads_weight 1
+```
+
+
+
+
+

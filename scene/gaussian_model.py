@@ -53,6 +53,7 @@ class GaussianModel:
         self._opacity = torch.empty(0)
         self.max_radii2D = torch.empty(0)
         self.xyz_gradient_accum = torch.empty(0)
+        self.norm_gradient_accum = torch.empty(0)
         self.denom = torch.empty(0)
 
         self.optimizer = None
@@ -97,6 +98,7 @@ class GaussianModel:
             self._opacity,
             self.max_radii2D,
             self.xyz_gradient_accum,
+            self.norm_gradient_accum,
             self.denom,
             self.optimizer.state_dict(),
             self.spatial_lr_scale,
@@ -123,6 +125,7 @@ class GaussianModel:
         self._opacity,
         self.max_radii2D, 
         xyz_gradient_accum, 
+        norm_gradient_accum, 
         denom,
         opt_dict, 
         self.spatial_lr_scale,
@@ -140,6 +143,7 @@ class GaussianModel:
         ) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
+        self.norm_gradient_accum = norm_gradient_accum
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
 
@@ -176,18 +180,6 @@ class GaussianModel:
         w=torch.transpose(self.opacity_mlp2_weight.reshape(-1,self.opacity_mlp2_n_output,self.opacity_mlp2_n_input), 1,2) # b,9,3
         return torch.bmm(x.reshape(-1,1,self.opacity_mlp2_n_input),w).reshape([-1,self.opacity_mlp2_n_output])+self.opacity_mlp2_bias
   
-
-    def embedding(self,x, min_deg=0, max_deg=1):
-        """
-        :param x: [b,m]
-        :return: [b,m*5]
-        """
-        scales = torch.tensor([2**i for i in range(min_deg, max_deg)]).type_as(x)  # 对于sin和cos中的各个维度的系数
-        #例如L=4的话scales=[1,2,4,8]
-        xb = torch.reshape((x[..., None, :] * scales[:, None]), list(x.shape[:-1]) + [-1])  # 利用广播策略做矩阵元素对应相乘
-        #  xb维度为(B,4,3)
-        four_feat = torch.sin(torch.cat([xb, xb + 0.5 * torch.pi], dim=-1))  #  分别求sin和cos，最后拼接在一起  four_feat维度为[B,4,6]
-        return torch.cat([x] + [four_feat], dim=-1)  # 最后和自身拼接得到最后结果 [B,27]
 
     @property
     def get_features(self):
@@ -265,6 +257,7 @@ class GaussianModel:
     def training_setup(self, training_args):
         self.percent_dense = training_args.percent_dense
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.norm_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
 
         l = [
@@ -562,6 +555,8 @@ class GaussianModel:
 
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
+        self.norm_gradient_accum = self.norm_gradient_accum[valid_points_mask]
+        
 
         self.denom = self.denom[valid_points_mask]
         self.max_radii2D = self.max_radii2D[valid_points_mask]
@@ -634,6 +629,8 @@ class GaussianModel:
         self.opacity_mlp2_bias=optimizable_tensors["opacity_mlp2_bias"]     
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        self.norm_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
+        
         self.denom = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.max_radii2D = torch.zeros((self.get_xyz.shape[0]), device="cuda")
 
@@ -709,12 +706,18 @@ class GaussianModel:
                                    new_norm_mlp1_weight,new_norm_mlp2_weight,new_norm_mlp1_bias,new_norm_mlp2_bias,
                                    new_opacity_mlp1_weight,new_opacity_mlp2_weight,new_opacity_mlp1_bias,new_opacity_mlp2_bias)
 
-    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size):
+
+
+    def densify_and_prune(self, max_grad, min_opacity, extent, max_screen_size,N=4,use_norm_grads=False,norm_grad_weight=0.1):
         grads = self.xyz_gradient_accum / self.denom
+        
+        if use_norm_grads:
+            grads=(1-norm_grad_weight)*grads+norm_grad_weight*self.norm_gradient_accum / self.denom
+            
         grads[grads.isnan()] = 0.0
 
         self.densify_and_clone(grads, max_grad, extent)
-        self.densify_and_split(grads, max_grad, extent)
+        self.densify_and_split(grads, max_grad, extent,N=N)
 
         prune_mask = (self.get_opacity < min_opacity).squeeze()
         if max_screen_size:
@@ -725,6 +728,9 @@ class GaussianModel:
 
         torch.cuda.empty_cache()
 
-    def add_densification_stats(self, viewspace_point_tensor, update_filter):
-        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
+    def add_densification_stats(self, viewspace_point_tensor,norm_tensor, update_filter,use_norm_grads=False):
+        self.xyz_gradient_accum[update_filter] += torch.norm(viewspace_point_tensor.grad[update_filter,:3], dim=-1, keepdim=True)
+        if use_norm_grads:
+            assert norm_tensor is not None
+            self.norm_gradient_accum[update_filter] += torch.norm(norm_tensor.grad[update_filter,:2], dim=-1, keepdim=True)
         self.denom[update_filter] += 1

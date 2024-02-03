@@ -113,6 +113,9 @@ def eval_sh(deg, sh, dirs):
 
 def RGB2SH(rgb):
     return (rgb - 0.5) / C0
-
+def NORM2SH(norm):
+    return (norm - 0.5) / C0
 def SH2RGB(sh):
+    return sh * C0 + 0.5
+def SH2NORM(sh):
     return sh * C0 + 0.5

@@ -1,13 +1,3 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
 
 from argparse import ArgumentParser, Namespace
 import sys
@@ -66,29 +56,8 @@ class PipelineParams(ParamGroup):
         self.convert_SHs_python = False
         self.compute_cov3D_python = False
         self.debug = False
+        
         super().__init__(parser, "Pipeline Parameters")
-
-# class OptimizationParams(ParamGroup):
-#     def __init__(self, parser):
-#         self.iterations = 30_000
-#         self.position_lr_init = 0.00016
-#         self.position_lr_final = 0.0000016
-#         self.position_lr_delay_mult = 0.01
-#         self.position_lr_max_steps = 30_000
-#         self.feature_lr = 0.0025
-#         self.opacity_lr = 0.05
-#         self.scaling_lr = 0.005
-#         self.rotation_lr = 0.001
-#         self.percent_dense = 0.01
-#         self.lambda_dssim = 0.2
-#         self.densification_interval = 100
-#         self.opacity_reset_interval = 3000
-#         self.densify_from_iter = 500
-#         self.densify_until_iter = 15_000
-#         self.densify_grad_threshold = 0.0002
-#         super().__init__(parser, "Optimization Parameters")
-
-
 
 class OptimizationParams(ParamGroup):
     def __init__(self, parser):
@@ -113,7 +82,7 @@ class OptimizationParams(ParamGroup):
         self.densification_interval = 100
         self.opacity_reset_interval = 3000
         self.densify_from_iter = 500
-        self.densify_until_iter = 15_000
+        self.densify_until_iter = 7_000
         self.densify_grad_threshold = 0.0002
         self.random_background = False
         super().__init__(parser, "Optimization Parameters")

@@ -1,13 +1,4 @@
-#
-# Copyright (C) 2023, Inria
-# GRAPHDECO research group, https://team.inria.fr/graphdeco
-# All rights reserved.
-#
-# This software is free for non-commercial, research and evaluation use 
-# under the terms of the LICENSE.md file.
-#
-# For inquiries contact  george.drettakis@inria.fr
-#
+
 
 import os
 import torch
@@ -28,7 +19,10 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, debug_from):
+
+def training(dataset, opt, pipe, testing_iterations, saving_iterations,
+             checkpoint_iterations, checkpoint, debug_from,use_norm_mlp,use_hierarchical,densify_grad_scalings,
+             use_hierarchical_split,densify_split_N,use_norm_grads,norm_grads_weight):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -48,6 +42,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
+    
+    densify_grad_thresholds=[scale*opt.densify_grad_threshold for scale in densify_grad_scalings]
+    densify_iters=[int(opt.densification_interval/scale) for scale in densify_grad_scalings]
+    densify_split_Ns=[2 for scale in densify_grad_scalings]
+    if use_hierarchical_split:
+        densify_split_Ns=[max(2,int(4*scale*densify_split_N)) for scale in densify_grad_scalings]
+    
+    
     for iteration in range(first_iter, opt.iterations + 1):        
         if network_gui.conn == None:
             network_gui.try_connect()
@@ -80,9 +82,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         # Render
         if (iteration - 1) == debug_from:
             pipe.debug = True
-        render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
+        bg = torch.rand((3), device="cuda") if opt.random_background else background
+
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg,use_norm_mlp=use_norm_mlp)
+        image, viewspace_point_tensor,norm_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"],render_pkg["norm"], render_pkg["visibility_filter"], render_pkg["radii"]
+        
+        
         # Loss
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
@@ -108,14 +114,23 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
             # Densification
             if iteration < opt.densify_until_iter:
-                # Keep track of max radii in image-space for pruning
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
 
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold)
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor,norm_tensor, visibility_filter)
+
+                if use_hierarchical:
                 
+                    for i in range(len(densify_grad_scalings)):
+                        if iteration > opt.densify_from_iter and iteration % densify_iters[i] == 0:
+                            size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                            gaussians.densify_and_prune(densify_grad_thresholds[i], 0.005, scene.cameras_extent, size_threshold,N=densify_split_Ns[i])
+                else:
+                    # Keep track of max radii in image-space for pruning
+                    if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                        size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                        gaussians.densify_and_prune(opt.densify_grad_threshold, 0.005, scene.cameras_extent, size_threshold,N=densify_split_N,
+                                                    use_norm_grads=use_norm_grads,norm_grad_weight=norm_grads_weight)
+                    
                 if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
                     gaussians.reset_opacity()
 
@@ -127,6 +142,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
+
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -192,17 +208,40 @@ if __name__ == "__main__":
     parser = ArgumentParser(description="Training script parameters")
     lp = ModelParams(parser)
     op = OptimizationParams(parser)
+    
     pp = PipelineParams(parser)
     parser.add_argument('--ip', type=str, default="127.0.0.1")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
-    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000,15_000,20_000,25_000,30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
+    
+    parser.add_argument("--use_norm_mlp",type=int, default =0)
+    parser.add_argument("--densification_iter",type=int, default =15_000)
+    parser.add_argument("--densify_grad_scaling", nargs="+",type=float, default =[0.25,0.5,1,2,4])
+    parser.add_argument("--use_hierarchical", nargs="+",type=int, default =0)
+    parser.add_argument("--densify_split_N",type=int, default =2)
+    parser.add_argument("--use_hierarchical_split",type=int, default =0)
+    parser.add_argument("--use_norm_grads",type=int, default =0)
+    parser.add_argument("--norm_grads_weight",type=float, default =0.0)
+    
+    parser.add_argument("--is_debug", type=int, default =0)
+    
+    
     args = parser.parse_args(sys.argv[1:])
+    
+    if args.is_debug:
+        print("[test]",end=' ')
+        op.iterations=100
+        args.iterations=100
+        args.test_iterations=[30,100]
+        args.save_iterations=[30,100]
+        args.checkpoint_iterations=[30,100]
+
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
@@ -210,10 +249,15 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
+
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, args.debug_from)
-
+    
+    op.densify_until_iter=args.densification_iter
+    
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations,args.save_iterations, args.checkpoint_iterations,args.start_checkpoint, args.debug_from,
+                args.use_norm_mlp,args.use_hierarchical,args.densify_grad_scaling,args.use_hierarchical_split,
+                args.densify_split_N,args.use_norm_grads,args.norm_grads_weight)
     # All done
     print("\nTraining complete.")

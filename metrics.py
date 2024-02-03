@@ -49,7 +49,7 @@ def evaluate(model_paths):
             full_dict_polytopeonly[scene_dir] = {}
             per_view_dict_polytopeonly[scene_dir] = {}
 
-            test_dir = Path(scene_dir) / "test"
+            test_dir = Path(scene_dir) / "train"
 
             for method in os.listdir(test_dir):
                 print("Method:", method)
@@ -99,5 +99,6 @@ if __name__ == "__main__":
     # Set up command line argument parser
     parser = ArgumentParser(description="Training script parameters")
     parser.add_argument('--model_paths', '-m', required=True, nargs="+", type=str, default=[])
+    
     args = parser.parse_args()
     evaluate(args.model_paths)
