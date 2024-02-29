@@ -1,4 +1,4 @@
-# NormLightGaussian: 3D Gaussian Splatting for Real lighting scene and Specular Object Reflection
+# NL-Gaussian: Normal-based Lighting Scene Rendering
 
 
 ## conda env
