@@ -67,11 +67,12 @@ class OptimizationParams(ParamGroup):
         self.position_lr_max_steps = 30_000
         self.feature_lr = 0.0025
         self.feature_norm_lr = 0.0025
+        self.feature_inlight_lr = 0.0025
         self.norm_mlp1_lr=0.002
         self.norm_mlp2_lr=0.002
         self.opacity_mlp1_lr=0.002
         self.opacity_mlp2_lr=0.001
-        
+        self.specular_coef=0.03
 
         self.opacity_lr = 0.05
         self.scaling_lr = 0.005

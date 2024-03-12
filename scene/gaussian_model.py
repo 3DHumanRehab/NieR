@@ -62,6 +62,8 @@ class GaussianModel:
 
         self._features_dc_norm = torch.empty(0)
         self._features_rest_norm = torch.empty(0)
+        self._features_dc_inlight = torch.empty(0)
+        self._features_rest_inlight = torch.empty(0)
         
         self.norm_mlp1_n_input=9
         self.norm_mlp1_n_output=3
@@ -82,7 +84,8 @@ class GaussianModel:
         self.opacity_mlp1_bias = torch.empty(0)
         self.opacity_mlp2_bias = torch.empty(0)
         self.opacity_weight=torch.tensor([0.1,0.2,0.7],device='cuda',requires_grad=False).reshape(3,1)
-
+        self.specular_coef=torch.empty(0)
+        
         self.setup_functions()
 
 
@@ -105,6 +108,8 @@ class GaussianModel:
 
             self._features_dc_norm ,
             self._features_rest_norm,
+            self._features_dc_inlight ,
+            self._features_rest_inlight,
             self.norm_mlp1_weight,
             self.norm_mlp2_weight,
             self.norm_mlp1_bias,
@@ -113,6 +118,8 @@ class GaussianModel:
             self.opacity_mlp2_weight,
             self.opacity_mlp1_bias,
             self.opacity_mlp2_bias,
+            self.specular_coef,
+            
         )
     
     def restore(self, model_args, training_args):
@@ -132,6 +139,8 @@ class GaussianModel:
 
         self._features_dc_norm ,
         self._features_rest_norm,
+        self._features_dc_inlight ,
+        self._features_rest_inlight,
         self.norm_mlp1_weight, #weight=(3,9),linear为[9,3]
         self.norm_mlp2_weight,
         self.norm_mlp1_bias, # 3
@@ -140,6 +149,8 @@ class GaussianModel:
         self.opacity_mlp2_weight,
         self.opacity_mlp1_bias,
         self.opacity_mlp2_bias,
+        self.specular_coef,
+        
         ) = model_args
         self.training_setup(training_args)
         self.xyz_gradient_accum = xyz_gradient_accum
@@ -147,6 +158,11 @@ class GaussianModel:
         self.denom = denom
         self.optimizer.load_state_dict(opt_dict)
 
+
+    @property
+    def get_specular_coef(self):
+        return self.specular_coef
+    
     @property
     def get_scaling(self):
         return self.scaling_activation(self._scaling)
@@ -164,6 +180,14 @@ class GaussianModel:
         features_dc_norm = self._features_dc_norm
         features_rest_norm = self._features_rest_norm
         return torch.cat((features_dc_norm, features_rest_norm), dim=1)
+    
+    @property
+    def get_features_inlight(self):
+        features_dc_inlight = self._features_dc_inlight
+        features_rest_inlight = self._features_rest_inlight
+        return torch.cat((features_dc_inlight, features_rest_inlight), dim=1)
+    
+    
     
     def norm_mlp1(self,x:torch.Tensor):#b,9
         w=torch.transpose(self.norm_mlp1_weight.reshape(-1,self.norm_mlp1_n_output,self.norm_mlp1_n_input), 1,2) # b,9,3
@@ -211,6 +235,12 @@ class GaussianModel:
         features_norm = torch.zeros((fused_norm.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
         features_norm[:, :3, 0 ] = fused_norm
         features_norm[:, 3:, 1:] = 0.0
+        
+        fused_inlight = NORM2SH(torch.tensor(np.asarray(pcd.colors)).float().cuda())
+        features_inlight = torch.zeros((fused_norm.shape[0], 3, (self.max_sh_degree + 1) ** 2)).float().cuda()
+        features_inlight[:, :3, 0 ] = fused_inlight
+        features_inlight[:, 3:, 1:] = 0.0
+        
 
         norm_mlp1_weight=torch.rand([fused_point_cloud.shape[0],self.norm_mlp1_n_input*self.norm_mlp1_n_output]).float().cuda()
         norm_mlp2_weight=torch.rand([fused_point_cloud.shape[0],self.norm_mlp2_n_input*self.norm_mlp2_n_output]).float().cuda()
@@ -221,6 +251,8 @@ class GaussianModel:
         opacity_mlp2_weight=torch.rand([fused_point_cloud.shape[0],self.opacity_mlp2_n_input*self.opacity_mlp2_n_output]).float().cuda()
         opacity_mlp1_bias=torch.rand([fused_point_cloud.shape[0],self.opacity_mlp1_n_output]).float().cuda()
         opacity_mlp2_bias=torch.rand([fused_point_cloud.shape[0],self.opacity_mlp2_n_output]).float().cuda()
+
+        specular_coef=torch.rand([fused_point_cloud.shape[0],1]).float().cuda()
 
         print("Number of points at initialisation : ", fused_point_cloud.shape[0])
 
@@ -238,6 +270,9 @@ class GaussianModel:
         self._features_dc_norm = nn.Parameter(features_norm[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest_norm = nn.Parameter(features_norm[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
 
+        self._features_dc_inlight = nn.Parameter(features_inlight[:,:,0:1].transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest_inlight = nn.Parameter(features_inlight[:,:,1:].transpose(1, 2).contiguous().requires_grad_(True))
+
         self._scaling = nn.Parameter(scales.requires_grad_(True))
         self._rotation = nn.Parameter(rots.requires_grad_(True))
         self._opacity = nn.Parameter(opacities.requires_grad_(True))
@@ -252,6 +287,9 @@ class GaussianModel:
         self.opacity_mlp2_weight= nn.Parameter(opacity_mlp2_weight.requires_grad_(True)) 
         self.opacity_mlp1_bias= nn.Parameter(opacity_mlp1_bias.requires_grad_(True)) 
         self.opacity_mlp2_bias= nn.Parameter(opacity_mlp2_bias.requires_grad_(True)) 
+
+        self.specular_coef = nn.Parameter(specular_coef.requires_grad_(True))
+        
 
 
     def training_setup(self, training_args):
@@ -269,6 +307,8 @@ class GaussianModel:
             {'params': [self._rotation], 'lr': training_args.rotation_lr, "name": "rotation"},
             {'params': [self._features_dc_norm], 'lr': training_args.feature_norm_lr, "name": "nf_dc_norm"},
             {'params': [self._features_rest_norm], 'lr': training_args.feature_norm_lr / 20.0, "name": "nf_rest_norm"},
+            {'params': [self._features_dc_inlight], 'lr': training_args.feature_inlight_lr, "name": "nf_dc_inlight"},
+            {'params': [self._features_rest_inlight], 'lr': training_args.feature_inlight_lr / 20.0, "name": "nf_rest_inlight"},
             {'params': [self.norm_mlp1_weight], 'lr': training_args.norm_mlp1_lr, "name": "norm_mlp1_weight"},
             {'params': [self.norm_mlp2_weight], 'lr': training_args.norm_mlp2_lr, "name": "norm_mlp2_weight"},
             {'params': [self.norm_mlp1_bias], 'lr': training_args.norm_mlp1_lr, "name": "norm_mlp1_bias"},
@@ -277,6 +317,7 @@ class GaussianModel:
             {'params': [self.opacity_mlp2_weight], 'lr': training_args.opacity_mlp2_lr, "name": "opacity_mlp2_weight"},
             {'params': [self.opacity_mlp1_bias], 'lr': training_args.opacity_mlp1_lr, "name": "opacity_mlp1_bias"},
             {'params': [self.opacity_mlp2_bias], 'lr': training_args.opacity_mlp2_lr, "name": "opacity_mlp2_bias"},
+            {'params': [self.specular_coef], 'lr': training_args.specular_coef, "name": "specular_coef"},
         ]
 
         self.optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15)
@@ -312,6 +353,11 @@ class GaussianModel:
         for i in range(self._features_rest_norm.shape[1]*self._features_rest_norm.shape[2]):
             l.append('nf_rest_norm_{}'.format(i)) 
 
+        for i in range(self._features_dc_inlight.shape[1]*self._features_dc_inlight.shape[2]):
+            l.append('nf_dc_inlight_{}'.format(i))
+        for i in range(self._features_rest_inlight.shape[1]*self._features_rest_inlight.shape[2]):
+            l.append('nf_rest_inlight_{}'.format(i)) 
+
         for i in range(self.norm_mlp1_weight.shape[1]):
             l.append('norm_mlp1_weight_{}'.format(i))
         for i in range(self.norm_mlp2_weight.shape[1]):
@@ -329,6 +375,7 @@ class GaussianModel:
             l.append('opacity_mlp1_bias_{}'.format(i))
         for i in range(self.opacity_mlp2_bias.shape[1]):
             l.append('opacity_mlp2_bias_{}'.format(i))
+        l.append('specular_coef')
 
         return l
 
@@ -344,6 +391,8 @@ class GaussianModel:
         rotation = self._rotation.detach().cpu().numpy()
         nf_dc_norm = self._features_dc_norm.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         nf_rest_norm = self._features_rest_norm.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        nf_dc_inlight = self._features_dc_inlight.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
+        nf_rest_inlight = self._features_rest_inlight.detach().transpose(1, 2).flatten(start_dim=1).contiguous().cpu().numpy()
         norm_mlp1_weight = self.norm_mlp1_weight.detach().cpu().numpy()
         norm_mlp2_weight = self.norm_mlp2_weight.detach().cpu().numpy()
         norm_mlp1_bias = self.norm_mlp1_bias.detach().cpu().numpy()
@@ -352,6 +401,7 @@ class GaussianModel:
         opacity_mlp2_weight = self.opacity_mlp2_weight.detach().cpu().numpy()
         opacity_mlp1_bias = self.opacity_mlp1_bias.detach().cpu().numpy()
         opacity_mlp2_bias = self.opacity_mlp2_bias.detach().cpu().numpy()
+        specular_coef=self.specular_coef.detach().cpu().numpy()
 
 
         dtype_full = [(attribute, 'f4') for attribute in self.construct_list_of_attributes()]
@@ -359,8 +409,8 @@ class GaussianModel:
         elements = np.empty(xyz.shape[0], dtype=dtype_full)
         attributes = np.concatenate((xyz, normals, f_dc, f_rest,
                                      opacities, scale, rotation,
-                                     nf_dc_norm,nf_rest_norm,norm_mlp1_weight,norm_mlp2_weight,norm_mlp1_bias,norm_mlp2_bias,
-                                     opacity_mlp1_weight,opacity_mlp1_bias,opacity_mlp2_weight,opacity_mlp2_bias
+                                     nf_dc_norm,nf_rest_norm,nf_dc_inlight,nf_rest_inlight,norm_mlp1_weight,norm_mlp2_weight,norm_mlp1_bias,norm_mlp2_bias,
+                                     opacity_mlp1_weight,opacity_mlp1_bias,opacity_mlp2_weight,opacity_mlp2_bias,specular_coef
                                      ), axis=1)
         elements[:] = list(map(tuple, attributes))
         
@@ -379,6 +429,8 @@ class GaussianModel:
                         np.asarray(plydata.elements[0]["y"]),
                         np.asarray(plydata.elements[0]["z"])),  axis=1)
         opacities = np.asarray(plydata.elements[0]["opacity"])[..., np.newaxis]
+        specular_coef = np.asarray(plydata.elements[0]["specular_coef"])[..., np.newaxis]
+        
 
         features_dc = np.zeros((xyz.shape[0], 3, 1))
         features_dc[:, 0, 0] = np.asarray(plydata.elements[0]["f_dc_0"])
@@ -398,6 +450,7 @@ class GaussianModel:
         features_dc_norm[:, 0, 0] = np.asarray(plydata.elements[0]["nf_dc_norm_0"])
         features_dc_norm[:, 1, 0] = np.asarray(plydata.elements[0]["nf_dc_norm_1"])
         features_dc_norm[:, 2, 0] = np.asarray(plydata.elements[0]["nf_dc_norm_2"])
+    
 
         extra_f_names_norm = [p.name for p in plydata.elements[0].properties if p.name.startswith("nf_rest_norm_")]
         extra_f_names_norm = sorted(extra_f_names_norm, key = lambda x: int(x.split('_')[-1]))
@@ -407,8 +460,22 @@ class GaussianModel:
             features_extra_norm[:, idx] = np.asarray(plydata.elements[0][attr_name])
         # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
         features_extra_norm = features_extra_norm.reshape((features_extra_norm.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+    
+        features_dc_inlight = np.zeros((xyz.shape[0], 3, 1))
+        features_dc_inlight[:, 0, 0] = np.asarray(plydata.elements[0]["nf_dc_inlight_0"])
+        features_dc_inlight[:, 1, 0] = np.asarray(plydata.elements[0]["nf_dc_inlight_1"])
+        features_dc_inlight[:, 2, 0] = np.asarray(plydata.elements[0]["nf_dc_inlight_2"])
+        
 
-
+        extra_f_names_inlight = [p.name for p in plydata.elements[0].properties if p.name.startswith("nf_rest_inlight_")]
+        extra_f_names_inlight = sorted(extra_f_names_inlight, key = lambda x: int(x.split('_')[-1]))
+        assert len(extra_f_names_inlight)==3*(self.max_sh_degree + 1) ** 2 - 3
+        features_extra_inlight = np.zeros((xyz.shape[0], len(extra_f_names_inlight)))
+        for idx, attr_name in enumerate(extra_f_names_inlight):
+            features_extra_inlight[:, idx] = np.asarray(plydata.elements[0][attr_name])
+        # Reshape (P,F*SH_coeffs) to (P, F, SH_coeffs except DC)
+        features_extra_inlight = features_extra_inlight.reshape((features_extra_inlight.shape[0], 3, (self.max_sh_degree + 1) ** 2 - 1))
+    
 
 
         scale_names = [p.name for p in plydata.elements[0].properties if p.name.startswith("scale_")]
@@ -484,6 +551,9 @@ class GaussianModel:
         self._features_dc_norm = nn.Parameter(torch.tensor(features_dc_norm, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         self._features_rest_norm = nn.Parameter(torch.tensor(features_extra_norm, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
         
+        self._features_dc_inlight = nn.Parameter(torch.tensor(features_dc_inlight, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        self._features_rest_inlight = nn.Parameter(torch.tensor(features_extra_inlight, dtype=torch.float, device="cuda").transpose(1, 2).contiguous().requires_grad_(True))
+        
         self.norm_mlp1_weight = nn.Parameter(torch.tensor(norm_mlp1_weight, dtype=torch.float, device="cuda").requires_grad_(True))
         self.norm_mlp2_weight = nn.Parameter(torch.tensor(norm_mlp2_weight, dtype=torch.float, device="cuda").requires_grad_(True))
         self.norm_mlp1_bias = nn.Parameter(torch.tensor(norm_mlp1_bias, dtype=torch.float, device="cuda").requires_grad_(True))
@@ -493,7 +563,8 @@ class GaussianModel:
         self.opacity_mlp2_weight = nn.Parameter(torch.tensor(opacity_mlp2_weight, dtype=torch.float, device="cuda").requires_grad_(True))
         self.opacity_mlp1_bias = nn.Parameter(torch.tensor(opacity_mlp1_bias, dtype=torch.float, device="cuda").requires_grad_(True))
         self.opacity_mlp2_bias = nn.Parameter(torch.tensor(opacity_mlp2_bias, dtype=torch.float, device="cuda").requires_grad_(True))
-
+        
+        self.specular_coef = nn.Parameter(torch.tensor(specular_coef, dtype=torch.float, device="cuda").requires_grad_(True))
 
         self.active_sh_degree = self.max_sh_degree
 
@@ -543,6 +614,8 @@ class GaussianModel:
 
         self._features_dc_norm = optimizable_tensors["nf_dc_norm"]
         self._features_rest_norm = optimizable_tensors["nf_rest_norm"]
+        self._features_dc_inlight = optimizable_tensors["nf_dc_inlight"]
+        self._features_rest_inlight = optimizable_tensors["nf_rest_inlight"]
         self.norm_mlp1_weight=optimizable_tensors["norm_mlp1_weight"]
         self.norm_mlp2_weight=optimizable_tensors["norm_mlp2_weight"]
         self.norm_mlp1_bias=optimizable_tensors["norm_mlp1_bias"]
@@ -553,6 +626,7 @@ class GaussianModel:
         self.opacity_mlp1_bias=optimizable_tensors["opacity_mlp1_bias"]
         self.opacity_mlp2_bias=optimizable_tensors["opacity_mlp2_bias"]
 
+        self.specular_coef=optimizable_tensors["specular_coef"]
 
         self.xyz_gradient_accum = self.xyz_gradient_accum[valid_points_mask]
         self.norm_gradient_accum = self.norm_gradient_accum[valid_points_mask]
@@ -585,9 +659,9 @@ class GaussianModel:
 
     def densification_postfix(self, new_xyz, new_features_dc, new_features_rest,
                               new_opacities, new_scaling, new_rotation,
-                              new_features_dc_norm, new_features_rest_norm,
+                              new_features_dc_norm, new_features_rest_norm,new_features_dc_inlight, new_features_rest_inlight,
                               norm_mlp1_weight,norm_mlp2_weight,norm_mlp1_bias,norm_mlp2_bias,
-                              opacity_mlp1_weight,opacity_mlp2_weight,opacity_mlp1_bias,opacity_mlp2_bias
+                              opacity_mlp1_weight,opacity_mlp2_weight,opacity_mlp1_bias,opacity_mlp2_bias,specular_coef
                               ):
         d = {"xyz": new_xyz,
         "f_dc": new_features_dc,
@@ -597,6 +671,8 @@ class GaussianModel:
         "rotation" : new_rotation,
         "nf_dc_norm": new_features_dc_norm,
         "nf_rest_norm": new_features_rest_norm,
+        "nf_dc_inlight": new_features_dc_inlight,
+        "nf_rest_inlight": new_features_rest_inlight,
         "norm_mlp1_weight":norm_mlp1_weight,
         "norm_mlp2_weight":norm_mlp2_weight,
         "norm_mlp1_bias":norm_mlp1_bias,
@@ -604,7 +680,8 @@ class GaussianModel:
         "opacity_mlp1_weight":opacity_mlp1_weight,
         "opacity_mlp2_weight":opacity_mlp2_weight,
         "opacity_mlp1_bias":opacity_mlp1_bias,
-        "opacity_mlp2_bias":opacity_mlp2_bias
+        "opacity_mlp2_bias":opacity_mlp2_bias,
+        "specular_coef":specular_coef,
         }
 
         optimizable_tensors = self.cat_tensors_to_optimizer(d)
@@ -617,6 +694,8 @@ class GaussianModel:
 
         self._features_dc_norm = optimizable_tensors["nf_dc_norm"]
         self._features_rest_norm = optimizable_tensors["nf_rest_norm"]
+        self._features_dc_inlight = optimizable_tensors["nf_dc_inlight"]
+        self._features_rest_inlight = optimizable_tensors["nf_rest_inlight"]
 
         self.norm_mlp1_weight=optimizable_tensors["norm_mlp1_weight"]
         self.norm_mlp2_weight=optimizable_tensors["norm_mlp2_weight"]
@@ -626,7 +705,10 @@ class GaussianModel:
         self.opacity_mlp1_weight=optimizable_tensors["opacity_mlp1_weight"]
         self.opacity_mlp2_weight=optimizable_tensors["opacity_mlp2_weight"]
         self.opacity_mlp1_bias=optimizable_tensors["opacity_mlp1_bias"]     
-        self.opacity_mlp2_bias=optimizable_tensors["opacity_mlp2_bias"]     
+        self.opacity_mlp2_bias=optimizable_tensors["opacity_mlp2_bias"]   
+        
+        self.specular_coef=optimizable_tensors["specular_coef"]   
+          
 
         self.xyz_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
         self.norm_gradient_accum = torch.zeros((self.get_xyz.shape[0], 1), device="cuda")
@@ -653,9 +735,13 @@ class GaussianModel:
         new_features_dc = self._features_dc[selected_pts_mask].repeat(N,1,1)
         new_features_rest = self._features_rest[selected_pts_mask].repeat(N,1,1)
         new_opacity = self._opacity[selected_pts_mask].repeat(N,1)
+        new_specular_coef = self.specular_coef[selected_pts_mask].repeat(N,1)
+        
 
         new_features_dc_norm = self._features_dc_norm[selected_pts_mask].repeat(N,1,1)
         new_features_rest_norm = self._features_rest_norm[selected_pts_mask].repeat(N,1,1)
+        new_features_dc_inlight = self._features_dc_inlight[selected_pts_mask].repeat(N,1,1)
+        new_features_rest_inlight = self._features_rest_inlight[selected_pts_mask].repeat(N,1,1)
 
         new_norm_mlp1_weight = self.norm_mlp1_weight[selected_pts_mask].repeat(N,1)
         new_norm_mlp2_weight = self.norm_mlp2_weight[selected_pts_mask].repeat(N,1)
@@ -668,9 +754,9 @@ class GaussianModel:
 
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacity, new_scaling, new_rotation,
-                                   new_features_dc_norm,new_features_rest_norm,
+                                   new_features_dc_norm,new_features_rest_norm,new_features_dc_inlight,new_features_rest_inlight,
                                    new_norm_mlp1_weight,new_norm_mlp2_weight,new_norm_mlp1_bias,new_norm_mlp2_bias,
-                                   new_opacity_mlp1_weight,new_opacity_mlp2_weight,new_opacity_mlp1_bias,new_opacity_mlp2_bias)
+                                   new_opacity_mlp1_weight,new_opacity_mlp2_weight,new_opacity_mlp1_bias,new_opacity_mlp2_bias,new_specular_coef)
 
         prune_filter = torch.cat((selected_pts_mask, torch.zeros(N * selected_pts_mask.sum(), device="cuda", dtype=bool)))
         self.prune_points(prune_filter)
@@ -690,6 +776,8 @@ class GaussianModel:
 
         new_features_dc_norm = self._features_dc_norm[selected_pts_mask]
         new_features_rest_norm = self._features_rest_norm[selected_pts_mask]
+        new_features_dc_inlight = self._features_dc_inlight[selected_pts_mask]
+        new_features_rest_inlight = self._features_rest_inlight[selected_pts_mask]
 
         new_norm_mlp1_weight = self.norm_mlp1_weight[selected_pts_mask]
         new_norm_mlp2_weight = self.norm_mlp2_weight[selected_pts_mask]
@@ -699,12 +787,12 @@ class GaussianModel:
         new_opacity_mlp2_weight = self.opacity_mlp2_weight[selected_pts_mask]
         new_opacity_mlp1_bias = self.opacity_mlp1_bias[selected_pts_mask]
         new_opacity_mlp2_bias = self.opacity_mlp2_bias[selected_pts_mask]
-
+        new_specular_coef = self.specular_coef[selected_pts_mask] 
 
         self.densification_postfix(new_xyz, new_features_dc, new_features_rest, new_opacities, new_scaling, new_rotation,
-                                   new_features_dc_norm,new_features_rest_norm,
+                                   new_features_dc_norm,new_features_rest_norm,new_features_dc_inlight,new_features_rest_inlight,
                                    new_norm_mlp1_weight,new_norm_mlp2_weight,new_norm_mlp1_bias,new_norm_mlp2_bias,
-                                   new_opacity_mlp1_weight,new_opacity_mlp2_weight,new_opacity_mlp1_bias,new_opacity_mlp2_bias)
+                                   new_opacity_mlp1_weight,new_opacity_mlp2_weight,new_opacity_mlp1_bias,new_opacity_mlp2_bias,new_specular_coef)
 
 
 

@@ -21,7 +21,7 @@ except ImportError:
 
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations,
-             checkpoint_iterations, checkpoint, debug_from,use_norm_mlp,use_hierarchical,densify_grad_scalings,
+             checkpoint_iterations, checkpoint, debug_from,use_norm_mlp,use_cosine,use_specular,use_hierarchical,densify_grad_scalings,
              use_hierarchical_split,densify_split_N,use_norm_grads,norm_grads_weight):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
@@ -58,7 +58,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
                 net_image_bytes = None
                 custom_cam, do_training, pipe.convert_SHs_python, pipe.compute_cov3D_python, keep_alive, scaling_modifer = network_gui.receive()
                 if custom_cam != None:
-                    net_image = render(custom_cam, gaussians, pipe, background,use_norm_mlp, scaling_modifer)["render"]
+                    net_image = render(custom_cam, gaussians, pipe, background,use_norm_mlp,use_cosine,use_specular, scaling_modifer)["render"]
                     net_image_bytes = memoryview((torch.clamp(net_image, min=0, max=1.0) * 255).byte().permute(1, 2, 0).contiguous().cpu().numpy())
                 network_gui.send(net_image_bytes, dataset.source_path)
                 if do_training and ((iteration < int(opt.iterations)) or not keep_alive):
@@ -85,7 +85,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
 
         bg = torch.rand((3), device="cuda") if opt.random_background else background
 
-        render_pkg = render(viewpoint_cam, gaussians, pipe, bg,use_norm_mlp)
+        render_pkg = render(viewpoint_cam, gaussians, pipe, bg,use_norm_mlp,use_cosine,use_specular)
         image, viewspace_point_tensor,norm_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"],render_pkg["norm"], render_pkg["visibility_filter"], render_pkg["radii"]
         
         
@@ -100,14 +100,14 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations,
         with torch.no_grad():
             # Progress bar
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            if iteration % 10 == 0:
+            if iteration % 1000 == 0:
                 progress_bar.set_postfix({"Loss": f"{ema_loss_for_log:.{7}f}"})
-                progress_bar.update(10)
+                progress_bar.update(1000)
             if iteration == opt.iterations:
                 progress_bar.close()
 
             # Log and save
-            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background,use_norm_mlp))
+            training_report(tb_writer, iteration, Ll1, loss, l1_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background,use_norm_mlp,use_cosine,use_specular))
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -210,7 +210,7 @@ if __name__ == "__main__":
     op = OptimizationParams(parser)
     
     pp = PipelineParams(parser)
-    parser.add_argument('--ip', type=str, default="127.0.0.1")
+    parser.add_argument('--ip', type=str, default="127.0.0.2")
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--debug_from', type=int, default=-1)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
@@ -221,6 +221,8 @@ if __name__ == "__main__":
     parser.add_argument("--start_checkpoint", type=str, default = None)
     
     parser.add_argument("--use_norm_mlp",type=int, default =0)
+    parser.add_argument("--use_cosine",type=int, default =0)
+    parser.add_argument("--use_specular",type=int, default =0)
     parser.add_argument("--densification_iter",type=int, default =15_000)
     parser.add_argument("--densify_grad_scaling", nargs="+",type=float, default =[0.25,0.5,1,2,4])
     parser.add_argument("--use_hierarchical", nargs="+",type=int, default =0)
@@ -257,7 +259,7 @@ if __name__ == "__main__":
     op.densify_until_iter=args.densification_iter
     
     training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations,args.save_iterations, args.checkpoint_iterations,args.start_checkpoint, args.debug_from,
-                args.use_norm_mlp,args.use_hierarchical,args.densify_grad_scaling,args.use_hierarchical_split,
+                args.use_norm_mlp,args.use_cosine,args.use_specular,args.use_hierarchical,args.densify_grad_scaling,args.use_hierarchical_split,
                 args.densify_split_N,args.use_norm_grads,args.norm_grads_weight)
     # All done
     print("\nTraining complete.")
